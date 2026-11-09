@@ -285,6 +285,79 @@ function exportImage(anchor: CameraAnchor, aspect: number, time: number) {
 const directorGenerating = computed(() => tasks.value.some(task => !task.error));
 
 nodeTools.register({
+  name: "listModels",
+  description: "列出导演台可用的文本模型（providerId / modelId / label）与当前已选模型；模型列表尚未加载时会先拉取",
+  parameters: z.strictObject({}),
+  async execute() {
+    if (!models.value.length) await loadModels();
+    return {
+      current: model.value,
+      models: models.value.map(item => ({
+        providerId: item.providerId,
+        providerLabel: item.providerLabel,
+        modelId: item.modelId,
+        label: item.label,
+      })),
+    };
+  },
+});
+
+nodeTools.register({
+  name: "setModel",
+  description: "选择导演台生成动画所用的文本模型；模型必须来自 listModels 返回的可用列表",
+  parameters: z.strictObject({
+    providerId: z.string().min(1).max(100),
+    modelId: z.string().min(1).max(200),
+  }),
+  async execute({ providerId, modelId }) {
+    if (!models.value.length) await loadModels();
+    const target = models.value.find(item => item.providerId === providerId && item.modelId === modelId);
+    if (!target) throw new Error(`模型不存在或当前不可用：${providerId}/${modelId}，可用模型请用 listModels 查询`);
+    model.value = JSON.stringify([providerId, modelId]);
+    return { providerId, modelId, label: target.label };
+  },
+});
+
+nodeTools.register({
+  name: "addMannequin",
+  description: "向导演台场景添加一个灰模关节人偶（预演走位与构图用），自动排在人偶队列最右侧；空场景时同时把相机放到默认机位",
+  parameters: z.strictObject({}),
+  async execute() {
+    if (modelError.value) throw new Error(`导演台模型未加载：${modelError.value}`);
+    const before = scene.value.objectList.length;
+    await addMannequin();
+    if (scene.value.objectList.length === before) throw new Error("人偶没有加进场景，请稍后重试");
+    const added = scene.value.objectList[scene.value.objectList.length - 1];
+    return {
+      objectCount: scene.value.objectList.length,
+      added: { threeJsonId: added.threeJsonId, name: added.name, position: added.position },
+    };
+  },
+});
+
+nodeTools.register({
+  name: "addAnchor",
+  description: "在导演台加一个镜头锚点（机位 position + 朝向 target + 焦距 fov），用于导出关键帧；省略的字段沿用当前场景相机",
+  parameters: z.strictObject({
+    time: z.number().min(0).max(300).optional(),
+    position: z.strictObject({ x: z.number(), y: z.number(), z: z.number() }).optional(),
+    target: z.strictObject({ x: z.number(), y: z.number(), z: z.number() }).optional(),
+    fov: z.number().min(5).max(120).optional(),
+  }),
+  async execute({ time, position, target, fov }) {
+    const config = scene.value.sceneConfig;
+    const anchor = {
+      id: crypto.randomUUID(),
+      time,
+      camera: { ...config.camera, position: position ?? config.camera.position, fov: fov ?? config.camera.fov },
+      controls: { ...config.controls, target: target ?? config.controls.target },
+    };
+    anchors.value = [...anchors.value, anchor];
+    return { anchors: anchors.value.length, anchor };
+  },
+});
+
+nodeTools.register({
   name: "setPrompt",
   description: "写入 3D 导演台的生成指令（场景、角色动作、运镜），只写输入框，不触发生成",
   parameters: z.strictObject({ prompt: z.string().max(8000) }),
@@ -303,6 +376,8 @@ nodeTools.register({
       objects: scene.value.objectList.map(({ threeJsonId, name, objType }) => ({ threeJsonId, name, objType })),
       anchors: anchors.value.length,
       selectedPlanId: data.value.selectedPlanId ?? "",
+      model: model.value,
+      modelLabel: selectedModel.value?.label ?? "",
       prompt: prompt.value,
       generating: directorGenerating.value,
       plans: plans.value.map(plan => ({
@@ -324,6 +399,7 @@ nodeTools.register({
     if (text) setPrompt(text);
     if (directorGenerating.value) throw new Error("导演台已有生成任务在进行，请等待完成");
     if (!prompt.value.trim()) throw new Error("生成指令为空");
+    if (!models.value.length) await loadModels();
     if (!selectedModel.value) throw new Error("导演台还没有可用的文本模型，请先在节点里选择模型");
     void generate();
     return { started: true, plans: plans.value.length };
