@@ -25,7 +25,7 @@ import { computed, onBeforeUnmount, ref, shallowRef, watch } from "vue";
 import { useVueFlow } from "@vue-flow/core";
 import { IconCube3dSphere } from "@tabler/icons-vue";
 import { ElLoading, ElMessage } from "element-plus";
-import { nodeSkeleton, useNode, useNodeFiles, z, type NodeHandle, type NodeData, type NodeAiModel } from "@toonflow/nodes-scaffold/runtime";
+import { nodeSkeleton, nodeTools, useNode, useNodeFiles, z, type NodeHandle, type NodeData, type NodeAiModel } from "@toonflow/nodes-scaffold/runtime";
 import { useNodeReferences } from "@toonflow/node-shared/useNodeReferences";
 import promptInput from "@toonflow/node-shared/promptInput";
 import referenceItem from "@toonflow/node-shared/referenceItem";
@@ -281,6 +281,90 @@ function exportImage(anchor: CameraAnchor, aspect: number, time: number) {
     return new File([file], `${name}.png`, { type: file.type });
   });
 }
+
+const directorGenerating = computed(() => tasks.value.some(task => !task.error));
+
+nodeTools.register({
+  name: "setPrompt",
+  description: "写入 3D 导演台的生成指令（场景、角色动作、运镜），只写输入框，不触发生成",
+  parameters: z.strictObject({ prompt: z.string().max(8000) }),
+  async execute({ prompt: text }) {
+    setPrompt(text);
+    return { prompt: prompt.value };
+  },
+});
+
+nodeTools.register({
+  name: "getScript",
+  description: "读取导演台当前状态：场景物体、取景数量、每个动画方案的时长/轨道数/关键帧数、当前选中方案、是否正在生成",
+  parameters: z.strictObject({}),
+  async execute() {
+    return {
+      objects: scene.value.objectList.map(({ threeJsonId, name, objType }) => ({ threeJsonId, name, objType })),
+      anchors: anchors.value.length,
+      selectedPlanId: data.value.selectedPlanId ?? "",
+      prompt: prompt.value,
+      generating: directorGenerating.value,
+      plans: plans.value.map(plan => ({
+        id: plan.id,
+        name: plan.name,
+        duration: plan.duration,
+        tracks: plan.tracks.length,
+        cameraFrames: plan.cameraFrames.length,
+      })),
+    };
+  },
+});
+
+nodeTools.register({
+  name: "generateAnimation",
+  description: "按当前提示词（或本次传入的提示词）生成一段动画方案。异步执行并立即返回，用 getScript 查看新方案与完成状态",
+  parameters: z.strictObject({ prompt: z.string().max(8000).optional() }),
+  async execute({ prompt: text }) {
+    if (text) setPrompt(text);
+    if (directorGenerating.value) throw new Error("导演台已有生成任务在进行，请等待完成");
+    if (!prompt.value.trim()) throw new Error("生成指令为空");
+    if (!selectedModel.value) throw new Error("导演台还没有可用的文本模型，请先在节点里选择模型");
+    void generate();
+    return { started: true, plans: plans.value.length };
+  },
+});
+
+nodeTools.register({
+  name: "selectPlan",
+  description: "选择要预览与导出的动画方案",
+  parameters: z.strictObject({ planId: z.string().min(1).max(100) }),
+  async execute({ planId }) {
+    if (!plans.value.some(plan => plan.id === planId)) throw new Error(`方案不存在：${planId}`);
+    data.value.selectedPlanId = planId;
+    return { selectedPlanId: planId };
+  },
+});
+
+nodeTools.register({
+  name: "exportKeyframe",
+  description: "把第 index 个取景（从 1 开始，默认第 1 个）按比例渲染成 PNG，并新建图片节点；返回导出的序号",
+  parameters: z.strictObject({ index: z.number().int().min(1).optional(), aspect: z.number().positive().optional() }),
+  async execute({ index = 1, aspect = 16 / 9 }) {
+    const anchor = anchors.value[index - 1];
+    if (!anchor) throw new Error(`没有第 ${index} 个取景，当前只有 ${anchors.value.length} 个`);
+    if (exportingImage.value) throw new Error("正在导出关键帧，请稍后重试");
+    await exportImage(anchor, aspect, selectedPlan.value?.duration ?? 0);
+    return { exported: index, anchors: anchors.value.length };
+  },
+});
+
+nodeTools.register({
+  name: "exportAnimation",
+  description: "把当前选中的动画方案按比例渲染成 MP4，并新建视频节点；用于把 3D 预演交给下游视频节点",
+  parameters: z.strictObject({ aspect: z.number().positive().optional() }),
+  async execute({ aspect = 16 / 9 }) {
+    if (!selectedPlan.value) throw new Error("还没有选中的动画方案");
+    if (exportingVideo.value) throw new Error("正在导出视频，请稍后重试");
+    await exportVideo(aspect);
+    return { exported: true, planId: selectedPlan.value.id };
+  },
+});
 
 async function loadModels() {
   if (modelsLoading.value) return;
