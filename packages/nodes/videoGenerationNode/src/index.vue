@@ -493,7 +493,7 @@ nodeTools.register({
   }),
   async execute({ path, mimeType }, { signal }) {
     signal?.throwIfAborted();
-    if (generating.value || cancelling.value || deleting.value || uploading.value) throw new Error("视频正在生成、替换或删除，请稍后重试");
+    if (generating.value || deleting.value || uploading.value) throw new Error("视频正在生成、替换或删除，请稍后重试");
     uploading.value = true;
     try {
       const content = await files.getWorkspaceFiles().read(path);
